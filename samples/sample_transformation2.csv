@@ -1,0 +1,24 @@
+Source Table,Source Column,Source Column Datatype,Source Column Data Length,Target Table,Target Column,Target Column Datatype,Target Column Data Length,Transformation Logic
+orders,order_id,VARCHAR,50,orders_cleaned,order_id,VARCHAR,50,validate order_id must start with 'ORD-' followed by exactly 8 digits
+orders,customer_email,VARCHAR,255,orders_cleaned,customer_email,VARCHAR,255,validate email must contain @ symbol and a valid domain with at least one dot after @
+orders,customer_phone,VARCHAR,20,orders_cleaned,customer_phone,VARCHAR,15,extract only numeric digits from phone and validate it must be exactly 10 digits
+orders,first_name,VARCHAR,100,orders_cleaned,full_name,VARCHAR,200,concatenate first_name and last_name with a single space in between
+orders,last_name,VARCHAR,100,orders_cleaned,full_name,VARCHAR,200,concatenate first_name and last_name with a single space in between
+orders,order_amount,VARCHAR,20,orders_cleaned,order_amount,DECIMAL,10,convert to decimal and validate amount must be greater than 0 and less than 1000000
+orders,currency_code,VARCHAR,10,orders_cleaned,currency_code,VARCHAR,3,validate currency_code must be exactly 3 uppercase letters (ISO 4217 format)
+orders,order_date,VARCHAR,30,orders_cleaned,order_date,DATE,,convert order_date string to DATE format YYYY-MM-DD
+orders,order_timestamp,VARCHAR,30,orders_cleaned,order_timestamp,TIMESTAMP,,convert order_timestamp string to TIMESTAMP format YYYY-MM-DD HH:MI:SS
+orders,shipping_address,VARCHAR,500,orders_cleaned,shipping_address,VARCHAR,500,trim leading and trailing whitespace and replace multiple spaces with single space
+orders,postal_code,VARCHAR,20,orders_cleaned,postal_code,VARCHAR,10,validate US postal code must be either 5 digits or 5 digits followed by hyphen and 4 digits (XXXXX or XXXXX-XXXX)
+orders,country_code,VARCHAR,10,orders_cleaned,country_code,VARCHAR,2,validate country_code must be exactly 2 uppercase letters and convert to uppercase if lowercase
+orders,order_status,VARCHAR,50,orders_cleaned,order_status,VARCHAR,20,"map status values: 'P' or 'pending' to 'PENDING', 'C' or 'completed' to 'COMPLETED', 'F' or 'failed' to 'FAILED', else NULL"
+orders,discount_percentage,VARCHAR,10,orders_cleaned,discount_percentage,DECIMAL,5,convert to decimal and validate must be between 0 and 100 inclusive
+orders,ip_address,VARCHAR,50,orders_cleaned,ip_address,VARCHAR,15,validate IPv4 format with 4 octets separated by dots where each octet is 0-255
+orders,credit_card_last4,VARCHAR,20,orders_cleaned,credit_card_last4,VARCHAR,4,extract last 4 characters and validate they must be all digits
+orders,created_at,TIMESTAMP,,orders_cleaned,created_at,TIMESTAMP,,direct move
+orders,updated_at,TIMESTAMP,,orders_cleaned,updated_at,TIMESTAMP,,direct move
+orders,is_deleted,INTEGER,,orders_cleaned,is_deleted,BOOLEAN,,convert 0 to FALSE and 1 to TRUE and validate value must be either 0 or 1
+orders,notes,TEXT,,orders_cleaned,notes,VARCHAR,1000,truncate notes to first 1000 characters and remove any HTML tags
+orders,quantity,VARCHAR,10,orders_cleaned,quantity,INTEGER,,convert to integer and validate quantity must be a positive whole number greater than 0
+orders,sku_code,VARCHAR,50,orders_cleaned,sku_code,VARCHAR,50,validate SKU must be alphanumeric with optional hyphens and uppercase all letters
+orders,payment_method,VARCHAR,50,orders_cleaned,payment_method,VARCHAR,20,consider only orders where payment_method is 'credit_card' or 'debit_card' or 'paypal'

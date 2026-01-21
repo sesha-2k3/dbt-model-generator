@@ -1,0 +1,10 @@
+Source Table ,Source Column,Source Column Datatype,Source Column Data Length,,Target Table,Target Column,Target Column Datatype,Target Column Data Length,Transformation Logic
+customers,customer_id,INTEGER,,,customers_updated,customer_id,INTEGER,,direct move
+customers,first_name,VARCHAR,60,,customers_updated,first_name,VARCHAR,60,"validate first name must have english literals, and there is no numeric characters"
+customers,last_name,VARCHAR,60,,customers_updated,last_name,VARCHAR,60,"validate first name must have english literals, and there is no numeric characters"
+customers,email,VARCHAR,255,,customers_updated,email,VARCHAR,255,direct move
+customers,phone,VARCHAR,20,,customers_updated,phone,VARCHAR,20,phone number must have 10 digits may have hyphen in between
+customers,city,VARCHAR,100,,customers_updated,city,VARCHAR,100,ensure that the incoming city is a valid US city
+customers,country,VARCHAR,100,,customers_updated,country,VARCHAR,100,direct move
+customers,signup_date,VARCHAR,20,,customers_updated,signup_date,DATE,,convert the signup_date column to exact date format as per my sql
+customers,status,ENUM,,,customers_updated,status,ENUM,,consider only the customers who are 'Active'

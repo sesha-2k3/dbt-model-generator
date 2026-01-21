@@ -1,7 +1,7 @@
 [project]
 name = "dbt-model-generator"
 version = "0.1.0"
-description = "Add your description here"
+description = "A Streamlit app to generate DBT models from mapping documents using LLM"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []

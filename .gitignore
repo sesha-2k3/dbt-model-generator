@@ -12,5 +12,5 @@ __pycache__/
 .vscode/
 .idea/
 
-# macOS
+# macOS files
 .DS_Store
