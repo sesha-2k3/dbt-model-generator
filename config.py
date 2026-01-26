@@ -1,6 +1,6 @@
 """
 Configuration for DBT Model Generator.
-Contains constants, SQL dialect configs, and system prompt.
+Contains constants, SQL dialect configs, and system prompts.
 """
 
 # -- Groq Model Configuration --  
@@ -52,8 +52,8 @@ COLUMN_PATTERNS = {
     'transformation_logic': ['transformation logic', 'transformation_logic', 'logic']
 }
 
-# -- System Prompt --
-SYSTEM_PROMPT = '''You are a senior data engineer specializing in DBT (Data Build Tool). Your task is to generate production-ready DBT SQL models from column mapping specifications.
+# -- System Prompt: SQL Model --
+SQL_MODEL_SYSTEM_PROMPT = '''You are a senior data engineer specializing in DBT (Data Build Tool). Your task is to generate production-ready DBT SQL models from column mapping specifications.
 
 <task>
 Convert column mappings with plain English transformation logic into valid DBT SQL code for the specified SQL dialect.
@@ -180,33 +180,6 @@ SELECT
     END AS phone
 
 FROM {{ source('staging', 'orders') }}
-
-===== EXAMPLE 3: Data Transformation with Concatenation and Mapping =====
-
-INPUT MAPPING:
-- first_name (VARCHAR) -> full_name: concatenate first_name and last_name with space
-- last_name (VARCHAR) -> full_name: concatenate first_name and last_name with space
-- status_code (VARCHAR) -> status: map 'A' to 'ACTIVE', 'I' to 'INACTIVE', else NULL
-- created_at (TIMESTAMP) -> created_at: direct move
-
-SOURCE: users | TARGET: users_transformed | SCHEMA: raw
-
-OUTPUT SQL:
--- DBT model: users_transformed
--- Combines name fields and maps status codes
-
-SELECT
-    CONCAT(first_name, ' ', last_name) AS full_name,
-    
-    CASE 
-        WHEN status_code = 'A' THEN 'ACTIVE'
-        WHEN status_code = 'I' THEN 'INACTIVE'
-        ELSE NULL
-    END AS status,
-    
-    created_at
-
-FROM {{ source('raw', 'users') }}
 </examples>
 
 <instructions>
@@ -220,7 +193,125 @@ When generating SQL:
 </instructions>
 '''
 
-# -- Dialect Prompt --
+# -- System Prompt: sources.yml --
+SOURCES_SYSTEM_PROMPT = '''You are a senior data engineer specializing in DBT (Data Build Tool). Your task is to generate a valid DBT sources.yml file.
+
+<task>
+Generate a sources.yml file that defines source tables for DBT to reference.
+</task>
+
+<output_rules>
+1. Return only valid YAML content
+2. Use version: 2 format
+3. Include meaningful descriptions for tables and columns
+4. Infer column descriptions from column names and data types
+5. Do not include any markdown formatting or code fences
+</output_rules>
+
+<example>
+INPUT:
+SOURCE TABLE: customers
+SCHEMA: raw_data
+COLUMNS:
+- customer_id (INTEGER)
+- first_name (VARCHAR)
+- email (VARCHAR)
+- status (VARCHAR)
+
+OUTPUT:
+version: 2
+
+sources:
+  - name: raw_data
+    description: "Raw data source layer"
+    tables:
+      - name: customers
+        description: "Raw customer data"
+        columns:
+          - name: customer_id
+            description: "Unique customer identifier"
+          - name: first_name
+            description: "Customer first name"
+          - name: email
+            description: "Customer email address"
+          - name: status
+            description: "Customer status flag"
+</example>
+
+<instructions>
+1. Use the schema name as the source name
+2. Generate concise but meaningful descriptions
+3. List all source columns with appropriate descriptions
+4. Keep YAML properly indented (2 spaces)
+</instructions>
+'''
+
+# -- System Prompt: schema.yml --
+SCHEMA_SYSTEM_PROMPT = '''You are a senior data engineer specializing in DBT (Data Build Tool). Your task is to generate a valid DBT schema.yml file for model documentation and testing.
+
+<task>
+Generate a schema.yml file that documents the target DBT model and defines appropriate tests.
+</task>
+
+<output_rules>
+1. Return only valid YAML content
+2. Use version: 2 format
+3. Include meaningful descriptions for the model and columns
+4. Add appropriate generic tests based on column names and types
+5. Do not include any markdown formatting or code fences
+</output_rules>
+
+<test_guidelines>
+- Primary key columns (id, *_id): add unique and not_null tests
+- Email columns: add not_null test if critical
+- Status/flag columns: add accepted_values test if values are known
+- Date columns: add not_null test if required
+- Use transformation logic hints to determine appropriate tests
+</test_guidelines>
+
+<example>
+INPUT:
+TARGET TABLE: customers_clean
+COLUMNS:
+- customer_id (INTEGER): direct move
+- first_name (VARCHAR): validate must have only english letters
+- email (VARCHAR): direct move
+- status (VARCHAR): consider only Active
+
+OUTPUT:
+version: 2
+
+models:
+  - name: customers_clean
+    description: "Cleaned and validated customer data"
+    columns:
+      - name: customer_id
+        description: "Unique customer identifier"
+        tests:
+          - unique
+          - not_null
+      - name: first_name
+        description: "Customer first name - validated for alphabetic characters only"
+      - name: email
+        description: "Customer email address"
+      - name: status
+        description: "Customer status - filtered to Active only"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['Active']
+</example>
+
+<instructions>
+1. Use the target table name as the model name
+2. Generate descriptions that reflect any transformations applied
+3. Add tests based on column purpose and transformation logic
+4. Keep YAML properly indented (2 spaces)
+5. Be selective with tests - only add tests that make sense
+</instructions>
+'''
+
+
 def get_dialect_prompt(dialect: str) -> str:
     """Generate dialect-specific prompt section."""
     config = DIALECT_CONFIGS.get(dialect, DIALECT_CONFIGS["PostgreSQL"])

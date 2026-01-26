@@ -1,9 +1,12 @@
 """
 DBT Model Generator
-Generates DBT transformation SQL from mapping documents.
+Generates DBT transformation SQL, sources.yml, and schema.yml from mapping documents.
 """
 
 import os
+import io
+import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import streamlit as st
 import pandas as pd
 from groq import Groq
@@ -11,7 +14,8 @@ from dotenv import load_dotenv
 from config import (
     MODEL_NAME, TEMPERATURE, MAX_TOKENS,
     SUPPORTED_DIALECTS, COLUMN_PATTERNS,
-    SYSTEM_PROMPT, get_dialect_prompt
+    SQL_MODEL_SYSTEM_PROMPT, SOURCES_SYSTEM_PROMPT, SCHEMA_SYSTEM_PROMPT,
+    get_dialect_prompt
 )
 
 load_dotenv()
@@ -22,15 +26,7 @@ st.set_page_config(page_title="DBT Model Generator", layout="wide")
 # --- Helper Functions ---
 
 def parse_file(uploaded_file) -> tuple[pd.DataFrame | None, str | None]:
-    """
-    Parse uploaded Excel or CSV file into a DataFrame.
-    
-    Args:
-        uploaded_file: Streamlit UploadedFile object
-        
-    Returns:
-        Tuple of (DataFrame, None) on success, or (None, error_message) on failure
-    """
+    """Parse uploaded Excel or CSV file into a DataFrame."""
     filename = uploaded_file.name.lower()
     
     if not filename.endswith(('.csv', '.xlsx', '.xls')):
@@ -56,30 +52,17 @@ def parse_file(uploaded_file) -> tuple[pd.DataFrame | None, str | None]:
 
 
 def get_column_mapping(df: pd.DataFrame) -> dict[str, str]:
-    """
-    Map expected standard column names to actual DataFrame columns.
-    
-    Uses two matching strategies:
-    1. Exact match against known patterns
-    2. Substring match for flexible column naming
-    
-    Args:
-        df: DataFrame with columns to map
-        
-    Returns:
-        Dictionary mapping standard names to actual column names
-    """
+    """Map expected standard column names to actual DataFrame columns."""
     mapping = {}
     df_columns = list(df.columns)
     
     for std_name, patterns in COLUMN_PATTERNS.items():
         for col in df_columns:
             col_normalized = col.lower().strip()
+            is_exact = col_normalized in patterns
+            is_substring = any(p in col_normalized for p in patterns)
             
-            is_exact_match = col_normalized in patterns
-            is_substring_match = any(pattern in col_normalized for pattern in patterns)
-            
-            if is_exact_match or is_substring_match:
+            if is_exact or is_substring:
                 mapping[std_name] = col
                 break
     
@@ -87,16 +70,7 @@ def get_column_mapping(df: pd.DataFrame) -> dict[str, str]:
 
 
 def get_table_pairs(df: pd.DataFrame, col_map: dict[str, str]) -> dict[str, tuple[str, str]]:
-    """
-    Extract unique source-target table pairs from DataFrame.
-    
-    Args:
-        df: DataFrame containing table mapping data
-        col_map: Column name mapping dictionary
-        
-    Returns:
-        Dictionary mapping display string to (source, target) tuple
-    """
+    """Extract unique source-target table pairs from DataFrame."""
     src_col = col_map.get('source_table')
     tgt_col = col_map.get('target_table')
     
@@ -104,7 +78,6 @@ def get_table_pairs(df: pd.DataFrame, col_map: dict[str, str]) -> dict[str, tupl
         return {}
     
     pairs = df[[src_col, tgt_col]].drop_duplicates()
-    
     return {
         f"{row[src_col]} → {row[tgt_col]}": (row[src_col], row[tgt_col])
         for _, row in pairs.iterrows()
@@ -112,23 +85,9 @@ def get_table_pairs(df: pd.DataFrame, col_map: dict[str, str]) -> dict[str, tupl
 
 
 def filter_by_table_pair(
-    df: pd.DataFrame, 
-    col_map: dict[str, str], 
-    src_table: str, 
-    tgt_table: str
+    df: pd.DataFrame, col_map: dict[str, str], src_table: str, tgt_table: str
 ) -> pd.DataFrame:
-    """
-    Filter DataFrame for a specific source-target table pair.
-    
-    Args:
-        df: Full mapping DataFrame
-        col_map: Column name mapping dictionary
-        src_table: Source table name to filter
-        tgt_table: Target table name to filter
-        
-    Returns:
-        Filtered DataFrame copy
-    """
+    """Filter DataFrame for a specific source-target table pair."""
     src_col = col_map.get('source_table')
     tgt_col = col_map.get('target_table')
     
@@ -140,38 +99,17 @@ def filter_by_table_pair(
 
 
 def format_type_info(src_type: str, tgt_type: str) -> str:
-    """
-    Format source and target data types into a display string.
-    
-    Args:
-        src_type: Source column data type
-        tgt_type: Target column data type
-        
-    Returns:
-        Formatted type string, e.g., " (VARCHAR → INT)" or empty string
-    """
+    """Format source and target data types into a display string."""
     types = [src_type, tgt_type]
-    
     if not any(types):
         return ""
-    
     formatted = ' → '.join(t for t in types if t)
     return f" ({formatted})"
 
 
 def build_mapping_text(df: pd.DataFrame, col_map: dict[str, str]) -> str:
-    """
-    Format mapping DataFrame as text for LLM prompt.
-    
-    Args:
-        df: Filtered mapping DataFrame
-        col_map: Column name mapping dictionary
-        
-    Returns:
-        Formatted mapping text with one line per column mapping
-    """
+    """Format mapping DataFrame as text for LLM prompt."""
     lines = []
-    
     for _, row in df.iterrows():
         src_col = row.get(col_map.get('source_column', ''), 'N/A')
         tgt_col = row.get(col_map.get('target_column', ''), 'N/A')
@@ -180,32 +118,49 @@ def build_mapping_text(df: pd.DataFrame, col_map: dict[str, str]) -> str:
         logic = row.get(col_map.get('transformation_logic', ''), 'direct move')
         
         type_info = format_type_info(str(src_type), str(tgt_type))
-        line = f"- {src_col}{type_info} → {tgt_col}: {logic}"
-        lines.append(line)
+        lines.append(f"- {src_col}{type_info} → {tgt_col}: {logic}")
     
     return "\n".join(lines)
 
 
-def build_user_prompt(
-    df: pd.DataFrame, 
-    col_map: dict[str, str], 
-    src_table: str, 
-    tgt_table: str, 
-    schema: str
-) -> str:
-    """
-    Build the user prompt with mapping data for LLM.
+def extract_columns_info(df: pd.DataFrame, col_map: dict[str, str], is_source: bool = True) -> str:
+    """Extract column info for sources.yml or schema.yml prompts."""
+    if is_source:
+        col_key, type_key = 'source_column', 'source_datatype'
+    else:
+        col_key, type_key = 'target_column', 'target_datatype'
     
-    Args:
-        df: Filtered mapping DataFrame
-        col_map: Column name mapping dictionary
-        src_table: Source table name
-        tgt_table: Target table name
-        schema: Schema name for DBT source reference
+    col_name = col_map.get(col_key, '')
+    type_name = col_map.get(type_key, '')
+    logic_name = col_map.get('transformation_logic', '')
+    
+    lines = []
+    seen = set()
+    
+    for _, row in df.iterrows():
+        col = row.get(col_name, 'N/A')
+        if col in seen:
+            continue
+        seen.add(col)
         
-    Returns:
-        Formatted prompt string
-    """
+        dtype = row.get(type_name, '') or 'VARCHAR'
+        logic = row.get(logic_name, '') or 'direct move' if not is_source else ''
+        
+        if is_source:
+            lines.append(f"- {col} ({dtype})")
+        else:
+            lines.append(f"- {col} ({dtype}): {logic}")
+    
+    return "\n".join(lines)
+
+
+# --- Prompt Builders ---
+
+def build_sql_model_prompt(
+    df: pd.DataFrame, col_map: dict[str, str],
+    src_table: str, tgt_table: str, schema: str
+) -> str:
+    """Build user prompt for SQL model generation."""
     mapping_text = build_mapping_text(df, col_map)
     
     return f"""<request>
@@ -233,24 +188,73 @@ SCHEMA: {schema}
 Generate the complete DBT model SQL now:"""
 
 
+def build_sources_prompt(
+    df: pd.DataFrame, col_map: dict[str, str], src_table: str, schema: str
+) -> str:
+    """Build user prompt for sources.yml generation."""
+    columns_info = extract_columns_info(df, col_map, is_source=True)
+    
+    return f"""<request>
+Generate a DBT sources.yml file for the following source table.
+</request>
+
+<source_info>
+SOURCE TABLE: {src_table}
+SCHEMA: {schema}
+</source_info>
+
+<source_columns>
+{columns_info}
+</source_columns>
+
+<requirements>
+1. Use version: 2 format
+2. Use '{schema}' as the source name
+3. Include meaningful descriptions for the table and each column
+4. Return only valid YAML content, no markdown fences
+</requirements>
+
+Generate the sources.yml content now:"""
+
+
+def build_schema_prompt(
+    df: pd.DataFrame, col_map: dict[str, str], tgt_table: str
+) -> str:
+    """Build user prompt for schema.yml generation."""
+    columns_info = extract_columns_info(df, col_map, is_source=False)
+    
+    return f"""<request>
+Generate a DBT schema.yml file for the following target model.
+</request>
+
+<model_info>
+MODEL NAME: {tgt_table}
+</model_info>
+
+<target_columns>
+{columns_info}
+</target_columns>
+
+<requirements>
+1. Use version: 2 format
+2. Include meaningful descriptions reflecting transformations
+3. Add appropriate tests (unique, not_null, accepted_values) where sensible
+4. Return only valid YAML content, no markdown fences
+</requirements>
+
+Generate the schema.yml content now:"""
+
+
+# --- LLM Functions ---
+
 def strip_markdown_fences(text: str) -> str:
-    """
-    Remove markdown code fences from LLM output.
-    
-    Handles common patterns like ```sql, ```, etc.
-    
-    Args:
-        text: Raw LLM output text
-        
-    Returns:
-        Cleaned SQL text without markdown formatting
-    """
+    """Remove markdown code fences from LLM output."""
     text = text.strip()
     
-    if text.startswith("```sql"):
-        text = text[6:]
-    elif text.startswith("```"):
-        text = text[3:]
+    for fence in ["```sql", "```yaml", "```yml", "```"]:
+        if text.startswith(fence):
+            text = text[len(fence):]
+            break
     
     if text.endswith("```"):
         text = text[:-3]
@@ -259,16 +263,7 @@ def strip_markdown_fences(text: str) -> str:
 
 
 def call_llm(system_prompt: str, user_prompt: str) -> tuple[str | None, str | None]:
-    """
-    Call Groq API to generate DBT model SQL.
-    
-    Args:
-        system_prompt: System message for LLM context
-        user_prompt: User message with mapping details
-        
-    Returns:
-        Tuple of (sql_code, None) on success, or (None, error_message) on failure
-    """
+    """Call Groq API to generate content."""
     api_key = os.getenv("GROQ_API_KEY")
     
     if not api_key:
@@ -276,7 +271,6 @@ def call_llm(system_prompt: str, user_prompt: str) -> tuple[str | None, str | No
     
     try:
         client = Groq(api_key=api_key)
-        
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
@@ -287,22 +281,62 @@ def call_llm(system_prompt: str, user_prompt: str) -> tuple[str | None, str | No
             max_tokens=MAX_TOKENS
         )
         
-        raw_output = response.choices[0].message.content
-        sql = strip_markdown_fences(raw_output)
-        
-        return sql, None
+        raw = response.choices[0].message.content
+        return strip_markdown_fences(raw), None
         
     except Exception as e:
         return None, f"API Error: {e}"
 
 
-def render_sidebar() -> tuple[str, str]:
+def generate_dbt_artifacts(
+    df: pd.DataFrame, col_map: dict[str, str],
+    src_table: str, tgt_table: str, schema: str, dialect: str
+) -> dict[str, tuple[str | None, str | None]]:
     """
-    Render sidebar with configuration options.
+    Generate SQL model, sources.yml, and schema.yml in parallel.
     
     Returns:
-        Tuple of (selected_dialect, schema_name)
+        Dictionary with keys 'sql', 'sources', 'schema', each containing
+        a tuple of (content, error).
     """
+    sql_system = SQL_MODEL_SYSTEM_PROMPT + get_dialect_prompt(dialect)
+    sql_user = build_sql_model_prompt(df, col_map, src_table, tgt_table, schema)
+    
+    sources_system = SOURCES_SYSTEM_PROMPT
+    sources_user = build_sources_prompt(df, col_map, src_table, schema)
+    
+    schema_system = SCHEMA_SYSTEM_PROMPT
+    schema_user = build_schema_prompt(df, col_map, tgt_table)
+    
+    tasks = {
+        'sql': (sql_system, sql_user),
+        'sources': (sources_system, sources_user),
+        'schema': (schema_system, schema_user)
+    }
+    
+    results = {}
+    
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        future_to_key = {
+            executor.submit(call_llm, sys_p, usr_p): key
+            for key, (sys_p, usr_p) in tasks.items()
+        }
+        
+        for future in as_completed(future_to_key):
+            key = future_to_key[future]
+            try:
+                content, error = future.result()
+                results[key] = (content, error)
+            except Exception as e:
+                results[key] = (None, f"Execution error: {e}")
+    
+    return results
+
+
+# --- UI Functions ---
+
+def render_sidebar() -> tuple[str, str]:
+    """Render sidebar with configuration options."""
     with st.sidebar:
         st.header("Configuration")
         
@@ -327,8 +361,8 @@ def render_sidebar() -> tuple[str, str]:
             1. **Upload** your mapping Excel/CSV file
             2. **Select** the SQL dialect
             3. **Choose** source-target table pair
-            4. **Click** Generate to create DBT model
-            5. **Download** the generated SQL file
+            4. **Click** Generate to create DBT artifacts
+            5. **Download** the generated files
             """)
         
         with st.expander("Expected File Format"):
@@ -348,16 +382,83 @@ def render_sidebar() -> tuple[str, str]:
     return dialect, schema_name
 
 
+def create_zip_file(results: dict, tgt_table: str) -> bytes | None:
+    """
+    Create a zip file containing all generated artifacts.
+    
+    Returns:
+        Bytes of the zip file, or None if no content to zip.
+    """
+    files = {
+        'sql': (f"{tgt_table.lower()}.sql", results.get('sql', (None, None))[0]),
+        'sources': ("sources.yml", results.get('sources', (None, None))[0]),
+        'schema': ("schema.yml", results.get('schema', (None, None))[0])
+    }
+    
+    valid_files = {k: v for k, v in files.items() if v[1] is not None}
+    
+    if not valid_files:
+        return None
+    
+    zip_buffer = io.BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for _, (filename, content) in valid_files.items():
+            zf.writestr(filename, content)
+    
+    zip_buffer.seek(0)
+    return zip_buffer.getvalue()
+
+
+def display_results(results: dict, tgt_table: str):
+    """Display generated artifacts in tabs with a single zip download button."""
+    
+    zip_data = create_zip_file(results, tgt_table)
+    if zip_data:
+        st.download_button(
+            label="📦 Download All as ZIP",
+            data=zip_data,
+            file_name=f"{tgt_table.lower()}_dbt_artifacts.zip",
+            mime="application/zip",
+            key="download_zip"
+        )
+    
+    tab_sql, tab_sources, tab_schema = st.tabs(["SQL Model", "sources.yml", "schema.yml"])
+    
+    with tab_sql:
+        content, error = results.get('sql', (None, "Not generated"))
+        if error:
+            st.error(f"SQL Model Error: {error}")
+        elif content:
+            st.code(content, language="sql")
+    
+    with tab_sources:
+        content, error = results.get('sources', (None, "Not generated"))
+        if error:
+            st.error(f"sources.yml Error: {error}")
+        elif content:
+            st.code(content, language="yaml")
+    
+    with tab_schema:
+        content, error = results.get('schema', (None, "Not generated"))
+        if error:
+            st.error(f"schema.yml Error: {error}")
+        elif content:
+            st.code(content, language="yaml")
+
+
 # --- Main Application ---
 
 def main():
     """Main application entry point."""
     
-    if 'generated_sql' not in st.session_state:
-        st.session_state.generated_sql = None
+    if 'generated_results' not in st.session_state:
+        st.session_state.generated_results = None
+    if 'current_tgt_table' not in st.session_state:
+        st.session_state.current_tgt_table = None
     
     st.title("DBT Model Generator")
-    st.markdown("Generate DBT transformation SQL from mapping documents")
+    st.markdown("Generate DBT SQL model, sources.yml, and schema.yml from mapping documents")
     st.divider()
     
     dialect, schema_name = render_sidebar()
@@ -374,7 +475,6 @@ def main():
         return
     
     df, error = parse_file(uploaded_file)
-    
     if error:
         st.error(error)
         return
@@ -397,34 +497,31 @@ def main():
     
     st.divider()
     
-    st.subheader("Generate DBT Model")
+    st.subheader("Generate DBT Artifacts")
     
-    if st.button("Generate SQL", type="primary"):
-        with st.spinner("Generating DBT model..."):
+    if st.button("Generate All", type="primary"):
+        with st.spinner("Generating DBT artifacts..."):
             filtered_df = filter_by_table_pair(df, col_map, src_table, tgt_table)
             
-            system_prompt = SYSTEM_PROMPT + get_dialect_prompt(dialect)
-            user_prompt = build_user_prompt(
-                filtered_df, col_map, src_table, tgt_table, schema_name
+            results = generate_dbt_artifacts(
+                filtered_df, col_map, src_table, tgt_table, schema_name, dialect
             )
             
-            sql, error = call_llm(system_prompt, user_prompt)
+            st.session_state.generated_results = results
+            st.session_state.current_tgt_table = tgt_table
             
-            if error:
-                st.error(error)
+            errors = [k for k, (c, e) in results.items() if e]
+            if errors:
+                st.warning(f"Completed with errors in: {', '.join(errors)}")
             else:
-                st.session_state.generated_sql = sql
-                st.success("DBT model generated successfully!")
+                st.success("All DBT artifacts generated successfully!")
     
-    if st.session_state.generated_sql:
-        st.subheader("Generated DBT Model")
-        st.code(st.session_state.generated_sql, language="sql")
-        
-        st.download_button(
-            label="Download SQL File",
-            data=st.session_state.generated_sql,
-            file_name=f"{tgt_table.lower()}.sql",
-            mime="text/plain"
+    if st.session_state.generated_results:
+        st.divider()
+        st.subheader("Generated Artifacts")
+        display_results(
+            st.session_state.generated_results,
+            st.session_state.current_tgt_table
         )
 
 
