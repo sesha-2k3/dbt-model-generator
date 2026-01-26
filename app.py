@@ -423,7 +423,7 @@ def main():
     if 'artifacts' not in st.session_state:
         st.session_state.artifacts = {'sql': None, 'source_yml': None, 'schema_yml': None}
 
-    st.title("🔧 DBT Model Generator")
+    st.title("DBT Model Generator")
     st.markdown("Generate DBT transformation SQL, source.yml, and schema.yml from mapping documents")
     st.divider()
 
