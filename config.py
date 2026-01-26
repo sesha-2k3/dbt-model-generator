@@ -417,7 +417,3 @@ SYNTAX REFERENCE:
 IMPORTANT: {config['notes']}
 </sql_dialect>
 '''
-
-
-# -- Legacy alias for backward compatibility --
-SYSTEM_PROMPT = SQL_SYSTEM_PROMPT
