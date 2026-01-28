@@ -26,12 +26,7 @@ st.set_page_config(page_title="DBT Model Generator", layout="wide")
 # --- File Parsing ---
 
 def parse_file(uploaded_file) -> tuple[pd.DataFrame | None, str | None]:
-    """
-    Parse uploaded Excel or CSV file into a DataFrame.
-
-    Returns:
-        Tuple of (DataFrame, None) on success, or (None, error_message) on failure
-    """
+    """Parse uploaded Excel or CSV file into a DataFrame."""
     filename = uploaded_file.name.lower()
 
     if not filename.endswith(('.csv', '.xlsx', '.xls')):
@@ -105,17 +100,7 @@ def extract_columns(
     col_map: dict[str, str],
     column_type: str = 'source'
 ) -> list[dict]:
-    """
-    Extract column metadata from mapping DataFrame.
-
-    Args:
-        df: Filtered mapping DataFrame
-        col_map: Column name mapping dictionary
-        column_type: 'source' or 'target'
-
-    Returns:
-        List of column dicts. Target includes 'logic' key.
-    """
+    """Extract column metadata from mapping DataFrame."""
     columns = []
     seen = set()
 
@@ -152,7 +137,6 @@ def build_mapping_text(df: pd.DataFrame, col_map: dict[str, str]) -> str:
         tgt_type = str(row.get(col_map.get('target_datatype', ''), '') or '')
         logic = row.get(col_map.get('transformation_logic', ''), 'direct move')
 
-        # Inline type formatting
         types = [t for t in [src_type, tgt_type] if t]
         type_info = f" ({' → '.join(types)})" if types else ""
 
@@ -166,10 +150,23 @@ def build_sql_user_prompt(
     col_map: dict[str, str],
     src_table: str,
     tgt_table: str,
-    schema: str
+    schema: str,
+    additional_instructions: str = ""
 ) -> str:
     """Build the user prompt for SQL generation."""
     mapping_text = build_mapping_text(df, col_map)
+
+    # Build additional instructions section if provided
+    additional_section = ""
+    if additional_instructions and additional_instructions.strip():
+        additional_section = f"""
+<additional_instructions>
+The user has provided the following modifications or additional requirements.
+Apply these changes while maintaining consistency with the base transformation logic:
+
+{additional_instructions.strip()}
+</additional_instructions>
+"""
 
     return f"""<request>
 Generate a DBT SQL model for the following transformation.
@@ -184,13 +181,14 @@ SCHEMA: {schema}
 <column_mappings>
 {mapping_text}
 </column_mappings>
-
+{additional_section}
 <requirements>
 1. Use {{{{ source('{schema}', '{src_table}') }}}} for the source table reference
 2. Apply all transformation logic exactly as specified
 3. Return NULL for any value that fails validation
 4. Add row-level filters to the WHERE clause
 5. Return only the SQL code
+6. If additional instructions are provided, incorporate them into the generated SQL
 </requirements>
 
 Generate the complete DBT model SQL now:"""
@@ -232,12 +230,28 @@ def build_source_yaml(
 
 # --- Schema YAML Generation (LLM-based) ---
 
-def build_schema_yaml_prompt(model_name: str, columns: list[dict]) -> str:
+def build_schema_yaml_prompt(
+    model_name: str,
+    columns: list[dict],
+    additional_instructions: str = ""
+) -> str:
     """Build the user prompt for schema.yml generation."""
     columns_text = "\n".join(
         f"- {col['name']} ({col['datatype']}): {col['logic']}"
         for col in columns
     )
+
+    # Build additional instructions section if provided
+    additional_section = ""
+    if additional_instructions and additional_instructions.strip():
+        additional_section = f"""
+<additional_instructions>
+The user has provided the following modifications that affect the data model.
+Adjust tests and descriptions accordingly:
+
+{additional_instructions.strip()}
+</additional_instructions>
+"""
 
     return f"""<request>
 Generate a DBT schema.yml file with appropriate data tests for this model.
@@ -250,12 +264,13 @@ Model Name: {model_name}
 <columns>
 {columns_text}
 </columns>
-
+{additional_section}
 <requirements>
 1. Infer appropriate tests based on column names and transformation logic
 2. Include meaningful descriptions for each column
 3. Use data_tests (not tests) for test definitions
 4. Return only valid YAML, no markdown fences or explanations
+5. If additional instructions modify accepted values or validations, reflect those changes in the tests
 </requirements>
 
 Generate the complete schema.yml now:"""
@@ -292,17 +307,7 @@ def call_llm(
     user_prompt: str,
     validate_as_yaml: bool = False
 ) -> tuple[str | None, str | None]:
-    """
-    Call Groq API for content generation.
-
-    Args:
-        system_prompt: System message for LLM context
-        user_prompt: User message with details
-        validate_as_yaml: If True, validate output as YAML
-
-    Returns:
-        Tuple of (content, None) on success, or (None, error) on failure
-    """
+    """Call Groq API for content generation."""
     api_key = os.getenv("GROQ_API_KEY")
 
     if not api_key:
@@ -381,7 +386,8 @@ def render_sidebar() -> tuple[str, str, str | None, dict]:
             2. **Configure** dialect and schema
             3. **Select** artifacts to generate
             4. **Choose** table pair
-            5. **Generate** and download
+            5. **Add** any additional instructions (optional)
+            6. **Generate** and download
             """)
 
         with st.expander("File Format"):
@@ -392,6 +398,31 @@ def render_sidebar() -> tuple[str, str, str | None, dict]:
             """)
 
     return dialect, schema_name, database_name, artifact_options
+
+
+def render_additional_instructions() -> str:
+    """Render the additional instructions input section."""
+    st.subheader("Additional Instructions (Optional)")
+
+    st.caption(
+        "Add any modifications to the transformation logic. "
+        "The changes will be incorporated into thegenerated artifacts."
+    )
+
+    additional_instructions = st.text_area(
+        "Additional instructions",
+        placeholder=(
+            "Examples:\n"
+            "• For payment_method, also include 'cash' as a valid value\n"
+            "• Add a new column 'processed_date' with current timestamp\n"
+            "• Exclude rows where order_amount is NULL\n"
+            "• Convert all string columns to uppercase"
+        ),
+        height=120,
+        label_visibility="collapsed"
+    )
+
+    return additional_instructions
 
 
 def render_artifact_tabs(artifacts: dict) -> None:
@@ -461,6 +492,11 @@ def main():
     src_table, tgt_table = table_pairs[selected]
 
     st.divider()
+
+    # NEW: Additional instructions section
+    additional_instructions = render_additional_instructions()
+
+    st.divider()
     st.subheader("Generate Artifacts")
 
     any_selected = any(artifact_options.values())
@@ -484,7 +520,10 @@ def main():
             progress.progress(step / total_steps, text="Generating SQL model...")
             sql, err = call_llm(
                 SQL_SYSTEM_PROMPT + get_dialect_prompt(dialect),
-                build_sql_user_prompt(filtered_df, col_map, src_table, tgt_table, schema_name)
+                build_sql_user_prompt(
+                    filtered_df, col_map, src_table, tgt_table,
+                    schema_name, additional_instructions  # Pass additional instructions
+                )
             )
             if err:
                 errors.append(f"SQL: {err}")
@@ -503,7 +542,10 @@ def main():
             progress.progress(step / total_steps, text="Generating schema.yml...")
             schema_yml, err = call_llm(
                 SCHEMA_YAML_SYSTEM_PROMPT,
-                build_schema_yaml_prompt(tgt_table, target_columns),
+                build_schema_yaml_prompt(
+                    tgt_table, target_columns,
+                    additional_instructions  # Pass additional instructions
+                ),
                 validate_as_yaml=True
             )
             if err:
