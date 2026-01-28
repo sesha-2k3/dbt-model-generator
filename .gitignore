@@ -14,5 +14,7 @@ __pycache__/
 
 # macOS files
 .DS_Store
+
+# Sample files for local reference.
 changes.txt
 output_example.png
