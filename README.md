@@ -77,7 +77,3 @@ pyyaml>=6.0
 python-dotenv>=1.0.0
 openpyxl>=3.1.0
 ```
-
-## Contributing
-
-Contributions are welcome! Please open an issue or submit a pull request.
